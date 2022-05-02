@@ -7,10 +7,11 @@ from org.apache.spark.sql import SQLContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.sql import functions as F
+from pyspark.sql.functions import sequence, to_date, explode
 from dataframe_utilities import *
 
 args = getResolvedOptions(sys.argv, ['JOB_NAME'], ['JDBC_URL'], ['JDBC_DRIVER'], ['TABLES'],
-                          ['S3_CATALOGUE_BUCKET'], ['S3_TUMESTAMNP_BUCKET'], ['ES_URL'])
+                          ['S3_CATALOGUE_BUCKET'], ['S3_TIMESTAMP_BUCKET'], ['ES_URL'])
 sc = SparkContext()
 sql = SQLContext()
 glueContext = GlueContext(sc)
@@ -21,13 +22,13 @@ job.init(args['JOB_NAME'], args)
 url = args['JDBC_URL']
 driver = args['JDBC_DRIVER']
 s3_write_path_bucket = args['S3_CATALOGUE_BUCKET']
-s3_timestamp_bucket = args['S3_TUMESTAMNP_BUCKET']
+s3_timestamp_bucket = args['S3_TIMESTAMP_BUCKET']
 es_url = args['ES_URL']
 tables = json.load(args['TABLES'])
 
 queries = {
     'HUMAN_RESOURCE': { 'query' : 'select hr.id as resource_id, ts.startDate, ts.endDate, hr.type from HumanResource hr left join TimeSlot ts on hr._id = ts._resource_id where ts._updatedAt>=\'{0}\'', 'ts_file': 'HR/timestamp'},
-    'MATERIAL_RESOURCE': { 'query' : 'select mr.id as resource_id, mr.consumedDate as day, mr.type from MaterialResource mr where ms._updatedAt>=\'{0}\' and utlized=true', 'ts_file': 'MR/timestamp'},
+    'MATERIAL_RESOURCE': { 'query' : 'select mr.id as resource_id, mr.consumedDate as day, mr.type from MaterialResource mr where mr._updatedAt>=\'{0}\' and mr.utlized=true', 'ts_file': 'MR/timestamp'},
 }
 
 def process(tableName):
@@ -37,7 +38,7 @@ def process(tableName):
     df = fetch_data_from_mysql(spark, driver, url, query)
 
     if tableName == 'HUMAN_RESOURCE':
-        df = df.withColumn('day', F.explode(F.expr('sequence(startDate, endDate, interval 1 day)')))
+        df = df.withColumn('day', F.explode(F.expr('sequence(to_date(startDate), to_date(endDate), interval 1 day)')))
 
     df.createOrReplaceTempView('ResourceCountView')
     rc_df = sql.sql('select count(resource_id), type, day from ResourceCountView group by allocatedDate')
@@ -46,7 +47,7 @@ def process(tableName):
 
     if len(rc_df.take(1)) > 0:
         write_to_es(rc_df, '{}_statistics_index'.format(tableName.lower()), es_url)
-        write_to_catalogue(rc_df, s3_write_path_bucket, ['year', 'month', 'day'])
+        write_to_catalogue(rc_df, s3_write_path_bucket, ['type', 'year', 'month', 'day'])
 
 for tableName in tables:
     process(tableName)
